@@ -2391,7 +2391,7 @@ ospf_read (struct thread *thread)
   ospfh = (struct ospf_header *) STREAM_PNT (ibuf);
 
   /* associate packet with ospf interface */
-  oi = ospf_if_lookup_recv_if (ospf, iph->ip_src);
+  oi = ospf_if_lookup_recv_if (ospf, iph->ip_src, ifp);
 
   /* if no local ospf_interface, 
    * or header area is backbone but ospf_interface is not
@@ -2411,7 +2411,7 @@ ospf_read (struct thread *thread)
           return 0;
         }
     }
-    
+
   /* else it must be a local ospf interface, check it was received on 
    * correct link 
    */
