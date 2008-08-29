@@ -30,9 +30,9 @@
  *
  *        24       16        8        0
  * +--------+--------+--------+--------+
- * |    1   |  MBZ   |........|........|
+ * |    1   |........|........|........|
  * +--------+--------+--------+--------+
- * |<-Type->|<Resv'd>|<-- Instance --->|
+ * |<-Type->|<------- Instance ------->|
  *
  *
  * Type:      IANA has assigned '1' for Traffic Engineering.
@@ -182,6 +182,161 @@ struct te_link_subtlv_rsc_clsclr
   struct te_tlv_header	header;		/* Value length is 4 octets. */
   u_int32_t		value;		/* Admin. group membership. */
 };
+
+/* GMPLS Link Sub-TLV: Link Local/Remote Identifiers *//* Optional */
+#define GTE_LINK_SUBTLV_LRID			11
+struct gte_link_subtlv_lrid
+{
+  struct te_tlv_header	header;		/* Value length is 8 octets. */
+  struct in_addr	local;		/* Local ID (IP address) */
+  struct in_addr	remote;		/* Remote ID (IP address) */
+};
+
+/* GMPLS Link Sub-TLV: Link Protection Type *//* Optional */
+/* Link Protection TLV is encoded as follows:
+   
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |Protection Cap |                    Reserved                   |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+*/
+
+#define GTE_LINK_SUBTLV_PROTECTION		14
+struct gte_link_subtlv_protection
+{
+  struct te_tlv_header	header;
+
+#define GTE_PROTECTION_TYPE_EXTRA_TRAFFIC	0x01
+#define GTE_PROTECTION_TYPE_UNPROTECTED		0x02
+#define GTE_PROTECTION_TYPE_SHARED		0x04
+#define GTE_PROTECTION_TYPE_DEDICATED_ONE_TO_ONE	0x08
+#define GTE_PROTECTION_TYPE_DEDICATED_ONE_PLUS_ONE	0x10
+#define GTE_PROTECTION_TYPE_ENCHANCED		0x20
+#define GTE_PROTECTION_TYPE_RESERVED1		0x40
+#define GTE_PROTECTION_TYPE_RESERVED2		0x80
+  u_char		value;		/* Protection type */
+  u_char		padding[3];
+};
+
+/* Packet Switching specific info encoding for Capability Sub-TLV:
+   0                   1                   2                   3
+   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Minimum LSP Bandwidth                        |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |           Interface MTU       |            Padding            |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+*/
+
+struct gte_link_subtlv_capability_spec_psc
+{
+  float			minbw;		/* Min LSP Bandwidth */
+  u_int16_t  		mtu;		/* Interface MTU */
+  u_int16_t		padding;
+};
+
+/* TDM Switching specific info encoding for Capability Sub-TLV:
+   0                   1                   2                   3
+   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Minimum LSP Bandwidth                        |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |   Indication  |                 Padding                       |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+*/
+
+struct gte_link_subtlv_capability_spec_tdm
+{
+  float			minbw;		/* Min LSP Bandwidth */
+
+#define GTE_TDM_CAPABILITY_IND_STANDARD		0
+#define GTE_TDM_CAPABILITY_IND_ARBITRARY	1
+  u_char		indication;	/* Indication */
+  u_char		padding[3];
+};
+
+/* GMPLS Link Sub-TLV: Interface Switching Capability Descriptor *//* Optional */
+/* Interface Switching Capability Descriptor Sub-TLV is encoded as follows:
+   0                   1                   2                   3
+   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  | Switching Cap |   Encoding    |           Reserved            |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Max LSP Bandwidth at priority 0              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Max LSP Bandwidth at priority 1              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Max LSP Bandwidth at priority 2              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Max LSP Bandwidth at priority 3              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Max LSP Bandwidth at priority 4              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Max LSP Bandwidth at priority 5              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Max LSP Bandwidth at priority 6              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Max LSP Bandwidth at priority 7              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |        Switching Capability-specific information              |
+  |                  (variable)                                   |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+*/
+
+#define GTE_LINK_SUBTLV_CAPABILITY		15
+struct gte_link_subtlv_capability
+{
+  struct te_tlv_header	header;
+
+#define GTE_SWITCHING_TYPE_PSC1 		1
+#define GTE_SWITCHING_TYPE_PSC2 		2
+#define GTE_SWITCHING_TYPE_PSC3 		3
+#define GTE_SWITCHING_TYPE_PSC4 		4
+#define GTE_SWITCHING_TYPE_L2SC 		51
+#define GTE_SWITCHING_TYPE_TDM	 		100
+#define GTE_SWITCHING_TYPE_LSC 			150
+#define GTE_SWITCHING_TYPE_FSC 			200
+  u_char		capability;	/* Switching capability */
+
+#define GTE_ENCODING_TYPE_PACKET		1
+#define GTE_ENCODING_TYPE_ETHERNET		2
+#define GTE_ENCODING_TYPE_PDH			3
+#define GTE_ENCODING_TYPE_SDH_SONET		5
+#define GTE_ENCODING_TYPE_DWRAPPER		7
+#define GTE_ENCODING_TYPE_LAMBDA		8
+#define GTE_ENCODING_TYPE_FIBER			9
+#define GTE_ENCODING_TYPE_FIBERCHANNEL		11
+  u_char		encoding;	/* Encoding */
+  u_int16_t		reserved;
+  float			maxbw[8];	/* Max LSP Bandwidth */
+  struct gte_link_subtlv_capability_spec_psc	psc;	/* Packet Switching specific info. */
+  struct gte_link_subtlv_capability_spec_tdm	tdm;	/* TDM/SDH/STM Switching specific info. */  
+};
+
+
+/* GMPLS Link Sub-TLV: Shared Risk Link Group (SRLG) *//* Optional */
+/* Shared Risk Link Group (SRLG) Sub-TLV is encoded as follows:
+   0                   1                   2                   3
+   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Shared Risk Link Group Value                 |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                        ............                           |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                  Shared Risk Link Group Value                 |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+*/
+
+#define GTE_LINK_SUBTLV_SRLG			16
+struct gte_link_subtlv_srlg
+{
+  struct te_tlv_header	header;
+  struct list 		*srlg;		/* SRLG list. List nodes must be 'u_int32_t' type. */
+};
+
+
 
 /* Here are "non-official" architechtual constants. */
 #define MPLS_TE_MINIMUM_BANDWIDTH	1.0	/* Reasonable? *//* XXX */

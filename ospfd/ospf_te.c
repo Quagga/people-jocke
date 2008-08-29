@@ -105,6 +105,10 @@ struct mpls_te_link
   struct te_link_subtlv_max_rsv_bw max_rsv_bw;
   struct te_link_subtlv_unrsv_bw unrsv_bw;
   struct te_link_subtlv_rsc_clsclr rsc_clsclr;
+  struct gte_link_subtlv_lrid lrid;
+  struct gte_link_subtlv_protection protection;
+  struct gte_link_subtlv_capability capability; /* Only one capability TLV implemented */
+  struct gte_link_subtlv_srlg srlg;
 };
 
 /*
@@ -196,10 +200,21 @@ ospf_mpls_te_term (void)
 static void
 del_mpls_te_link (void *val)
 {
+  struct mpls_te_link *lp = (struct mpls_te_link *) val;
+  list_delete(lp->srlg.srlg); /* Free SRLG list */
+  
   XFREE (MTYPE_OSPF_MPLS_TE_LINKPARAMS, val);
   return;
 }
 
+/* SLRG list deletion */
+static void
+del_srlg_list(void *val)
+{
+  XFREE (MTYPE_TMP, val);
+  return;
+}
+  
 static u_int32_t
 get_mpls_te_instance_value (void)
 {
@@ -364,6 +379,22 @@ set_linkparams_link_header (struct mpls_te_link *lp)
   if (ntohs (lp->rsc_clsclr.header.type) != 0)
     length += TLV_SIZE (&lp->rsc_clsclr.header);
 
+  /* GTE_LINK_SUBTLV_LRID */
+  if (ntohs (lp->lrid.header.type) != 0)
+    length += TLV_SIZE (&lp->lrid.header);
+
+  /* GTE_LINK_SUBTLV_PROTECTION */
+  if (ntohs (lp->protection.header.type) != 0)
+    length += TLV_SIZE (&lp->protection.header);
+
+  /* GTE_LINK_SUBTLV_CAPABILITY */
+  if (ntohs (lp->capability.header.type) != 0)
+    length += TLV_SIZE (&lp->capability.header);
+
+  /* GTE_LINK_SUBTLV_SRLG */
+  if (ntohs (lp->srlg.header.type) != 0)
+    length += TLV_SIZE (&lp->srlg.header);
+
   lp->link_header.header.type   = htons (TE_TLV_LINK);
   lp->link_header.header.length = htons (length);
 
@@ -492,6 +523,165 @@ set_linkparams_rsc_clsclr (struct mpls_te_link *lp, u_int32_t classcolor)
   return;
 }
 
+/* Set GMPLS lrid local ID */
+static void
+set_linkparams_lrid_local (struct mpls_te_link *lp, struct in_addr value)
+{
+  lp->lrid.header.type = htons(GTE_LINK_SUBTLV_LRID);
+  lp->lrid.header.length = htons (sizeof (lp->lrid.local) + sizeof (lp->lrid.remote));
+  
+  lp->lrid.local = value;
+}
+
+/* Set GMPLS lrid local ID */
+static void
+set_linkparams_lrid_remote (struct mpls_te_link *lp, struct in_addr value)
+{
+  lp->lrid.header.type = htons(GTE_LINK_SUBTLV_LRID);
+  lp->lrid.header.length = htons (sizeof (lp->lrid.local) + sizeof (lp->lrid.remote));
+  
+  lp->lrid.remote = value;
+}
+  
+static void
+set_linkparams_protection (struct mpls_te_link *lp, u_char p)
+{
+  lp->protection.header.type = htons(GTE_LINK_SUBTLV_PROTECTION);
+  lp->protection.header.length = htons (sizeof (lp->protection.value));
+  lp->protection.value = p; 
+}
+
+static void
+set_linkparams_capability (struct mpls_te_link *lp, u_char c, u_char e, \
+    int i, float maxb, float minb)
+{
+  lp->capability.header.type = htons(GTE_LINK_SUBTLV_CAPABILITY);
+  
+  lp->capability.header.length = htons (sizeof (lp->capability.capability) + \
+      sizeof (lp->capability.encoding) + sizeof (lp->capability.reserved) + \
+      sizeof (lp->capability.maxbw) + sizeof(lp->capability.psc)); 
+	    /* Should variate depending on psc or tdm *//* XXX Fix this */
+  
+  lp->capability.capability = c;
+  lp->capability.encoding = e;
+  lp->capability.reserved = 0;
+  htonf(&maxb, &lp->capability.maxbw[i]);
+  htonf(&minb, &lp->capability.psc.minbw);
+  
+  
+  
+  
+  if (c == (GTE_SWITCHING_TYPE_PSC1 || GTE_SWITCHING_TYPE_PSC2 \
+	|| GTE_SWITCHING_TYPE_PSC3 || GTE_SWITCHING_TYPE_PSC4))
+      lp->capability.psc.mtu = htons(lp->ifp->mtu); 
+}
+
+/* Set GMPLS maxbw per class */
+static void
+set_linkparams_capability_maxbw (struct mpls_te_link *lp, int class, float bw)
+{
+  if (lp != NULL && (ntohs(lp->capability.header.type) != 0))
+    htonf(&bw, &lp->capability.maxbw[class]);
+}
+
+/* Set GMPLS minbw */
+static void
+set_linkparams_capability_minbw (struct mpls_te_link *lp, u_char cap, float bw)
+{
+  if (lp != NULL && (ntohs(lp->capability.header.type) != 0))
+  {
+    if (cap == GTE_SWITCHING_TYPE_TDM)
+      htonf(&bw, &lp->capability.tdm.minbw);
+    else
+      htonf(&bw, &lp->capability.psc.minbw);
+  }
+}
+
+
+/* Set GMPLS encoding */
+static void
+set_linkparams_capability_encoding(struct mpls_te_link *lp, u_char enc)
+{
+  if (lp != NULL && (ntohs(lp->capability.header.type) != 0))
+    lp->capability.encoding = enc;
+}
+
+/* Set initial GMPLS lsa parameters. */
+static void
+set_linkparams_capability_init (struct mpls_te_link *lp)
+{
+  struct interface *ifp = lp->ifp;
+  float bw,fval;
+  int i;
+  
+  lp->capability.header.type = htons(GTE_LINK_SUBTLV_CAPABILITY);
+  
+  lp->capability.header.length = htons (sizeof (lp->capability.capability) + \
+      sizeof (lp->capability.encoding) + sizeof (lp->capability.reserved) + \
+      sizeof (lp->capability.maxbw) + sizeof(lp->capability.psc)); 
+	    /* Should variate depending on psc or tdm *//* XXX Fix this */
+  
+  lp->capability.capability = GTE_SWITCHING_TYPE_PSC1;
+  lp->capability.encoding = GTE_ENCODING_TYPE_ETHERNET;
+  lp->capability.reserved = 0;
+  
+  fval = (float)((ifp->bandwidth ? ifp->bandwidth
+                                 : OSPF_DEFAULT_BANDWIDTH) * 1000 / 8);
+
+  
+  for (i = 0; i < 8; i++)
+    set_linkparams_capability_maxbw(lp, i, fval);
+
+  bw = MPLS_TE_MINIMUM_BANDWIDTH; 
+  htonf(&bw, &lp->capability.psc.minbw);
+  
+  lp->capability.psc.mtu = htons(lp->ifp->mtu); 
+
+}
+
+static void
+set_linkparams_capability_mtu(struct mpls_te_link *lp, u_int16_t mtu)
+{
+  if (lp != NULL && (ntohs(lp->capability.header.type) != 0))
+    lp->capability.psc.mtu = htons(mtu);
+}
+
+/* Set GMPLS capability type */
+static void
+set_linkparams_capability_cap (struct mpls_te_link *lp, u_char c)
+{
+  if (lp != NULL && (ntohs(lp->capability.header.type) != 0))
+    lp->capability.capability = c;
+}
+
+/* Set GMPLS capability indication */
+static void
+set_linkparams_capability_indication(struct mpls_te_link *lp, u_char ind)
+{
+  if (lp != NULL && (ntohs(lp->capability.header.type) != 0))
+    lp->capability.tdm.indication = ind;
+}
+
+
+static void
+set_linkparams_srlg (struct mpls_te_link *lp, u_int32_t s)
+{
+  if (lp->srlg.header.type == 0)
+  {
+    lp->srlg.header.type = htons(GTE_LINK_SUBTLV_SRLG);
+    lp->srlg.srlg = list_new();
+    lp->srlg.srlg->del = del_srlg_list;
+  }
+    
+  lp->srlg.header.length = htons (sizeof (s) * (1 + listcount(lp->srlg.srlg)));
+  
+  u_int32_t *sp;
+  sp = XMALLOC (MTYPE_TMP, sizeof(u_int32_t)); 
+  *sp = s;
+  
+  listnode_add (lp->srlg.srlg, sp);      
+}
+
 static void
 initialize_linkparams (struct mpls_te_link *lp)
 {
@@ -522,6 +712,10 @@ initialize_linkparams (struct mpls_te_link *lp)
   for (i = 0; i < 8; i++)
     set_linkparams_unrsv_bw (lp, i, &fval);
 
+  /* Try to set Capability */
+  for (i = 0; i < 8; i++)
+    set_linkparams_capability(lp, GTE_SWITCHING_TYPE_PSC1, \
+        GTE_ENCODING_TYPE_ETHERNET, i, fval, MPLS_TE_MINIMUM_BANDWIDTH);
   return;
 }
 
@@ -618,6 +812,8 @@ ospf_mpls_te_ism_change (struct ospf_interface *oi, int old_state)
   struct te_link_subtlv_link_type old_type;
   struct te_link_subtlv_link_id   old_id;
   struct mpls_te_link *lp;
+  float fval;
+  int i;
 
   if ((lp = lookup_linkparams_by_ifp (oi->ifp)) == NULL)
     {
@@ -655,6 +851,17 @@ IF_NAME (oi));
       set_linkparams_link_type (oi, lp);
       set_linkparams_link_id (oi, lp);
 
+      fval = (float)((oi->ifp->bandwidth ? oi->ifp->bandwidth
+                                 : OSPF_DEFAULT_BANDWIDTH) * 1000 / 8);
+
+
+      
+      for (i = 0; i < 8; i++)
+	set_linkparams_capability(lp, GTE_SWITCHING_TYPE_PSC1, \
+	  GTE_ENCODING_TYPE_ETHERNET, i, fval, MPLS_TE_MINIMUM_BANDWIDTH);
+  
+      
+      
       if ((ntohs (old_type.header.type) != ntohs (lp->link_type.header.type)
       ||   old_type.link_type.value     != lp->link_type.link_type.value)
       ||  (ntohs (old_id.header.type)   != ntohs (lp->link_id.header.type)
@@ -817,6 +1024,59 @@ build_link_subtlv_rsc_clsclr (struct stream *s, struct mpls_te_link *lp)
   return;
 }
 
+/* Build Local/Remote ID Sub-TLV */
+static void
+build_link_subtlv_lrid (struct stream *s, struct mpls_te_link *lp)
+{
+  struct te_tlv_header *tlvh = &lp->lrid.header;
+  if (ntohs (tlvh->type) != 0)
+    {
+      build_tlv_header (s, tlvh);
+      stream_put (s, tlvh+1, TLV_BODY_SIZE (tlvh));
+    }
+  return;
+}
+
+/* Build Protection Sub-TLV */
+static void
+build_link_subtlv_protection (struct stream *s, struct mpls_te_link *lp)
+{
+  struct te_tlv_header *tlvh = &lp->protection.header;
+  if (ntohs (tlvh->type) != 0)
+    {
+      build_tlv_header (s, tlvh);
+      stream_put (s, tlvh+1, TLV_BODY_SIZE (tlvh));
+    }
+  return;
+}
+
+/* Build Capability ID Sub-TLV */
+static void
+build_link_subtlv_capability (struct stream *s, struct mpls_te_link *lp)
+{
+  struct te_tlv_header *tlvh = &lp->capability.header;
+  if (ntohs (tlvh->type) != 0)
+    {
+      build_tlv_header (s, tlvh);
+      stream_put (s, tlvh+1, TLV_BODY_SIZE (tlvh));
+    }
+  return;
+}
+
+ /* Build SRLG ID Sub-TLV */
+static void
+build_link_subtlv_srlg (struct stream *s, struct mpls_te_link *lp)
+{
+  struct te_tlv_header *tlvh = &lp->srlg.header;
+  if (ntohs (tlvh->type) != 0)
+    {
+      build_tlv_header (s, tlvh);
+      stream_put (s, tlvh+1, TLV_BODY_SIZE (tlvh));
+    }
+  return;
+} 
+  
+  
 static void
 build_link_tlv (struct stream *s, struct mpls_te_link *lp)
 {
@@ -832,6 +1092,10 @@ build_link_tlv (struct stream *s, struct mpls_te_link *lp)
   build_link_subtlv_max_rsv_bw (s, lp);
   build_link_subtlv_unrsv_bw (s, lp);
   build_link_subtlv_rsc_clsclr (s, lp);
+  build_link_subtlv_lrid (s, lp);
+  build_link_subtlv_protection (s, lp);
+  build_link_subtlv_capability (s, lp);
+  build_link_subtlv_srlg (s, lp);
   return;
 }
 
@@ -1322,6 +1586,284 @@ show_vty_unknown_tlv (struct vty *vty, struct te_tlv_header *tlvh)
   return TLV_SIZE (tlvh);
 }
 
+/* Get GMPLS Capability description */
+const char *
+ospf_gmpls_get_capability_switching (int c)
+{
+  const char *cap = "Unkown";
+  
+  switch(c)
+  {
+    case GTE_SWITCHING_TYPE_PSC1:
+      cap = "Packet-Switch Capable-1";
+      break;
+    case GTE_SWITCHING_TYPE_PSC2:
+      cap = "Packet-Switch Capable-2";
+      break;
+    case GTE_SWITCHING_TYPE_PSC3:
+      cap = "Packet-Switch Capable-3";
+      break;
+    case GTE_SWITCHING_TYPE_PSC4:
+      cap = "Packet-Switch Capable-4";
+      break;
+    case GTE_SWITCHING_TYPE_L2SC:
+      cap = "Layer-2 Switch Capable";
+      break;
+    case GTE_SWITCHING_TYPE_TDM:
+      cap = "Time-Division-Multiplex Capable";
+      break;
+    case GTE_SWITCHING_TYPE_LSC:
+      cap = "Lambda-Switch Capable";
+      break;
+    case GTE_SWITCHING_TYPE_FSC:
+      cap = "Fiber-Switch Capable";
+      break;
+    default:
+      break;
+  }
+  return cap;
+
+}
+
+/* Get GMPLS encoding capability string */
+const char *
+ospf_gmpls_get_capability_encoding (int e)
+{
+  const char *enc = "Unknown";
+  
+  switch(e)
+  {
+    case GTE_ENCODING_TYPE_PACKET:
+      enc = "Packet";
+      break;
+    case GTE_ENCODING_TYPE_ETHERNET:
+      enc = "Ethernet";
+      break;
+    case GTE_ENCODING_TYPE_PDH:
+      enc = "ANSI/ETSI PDH";
+      break;
+    case GTE_ENCODING_TYPE_SDH_SONET:
+      enc = "SDH ITU-T G.707";
+      break;
+    case GTE_ENCODING_TYPE_DWRAPPER:
+      enc = "Digital Wrapper";
+      break;
+    case GTE_ENCODING_TYPE_LAMBDA:
+      enc = "Lambda (photonic)";
+      break;
+    case GTE_ENCODING_TYPE_FIBER:
+      enc = "Fiber";
+      break;
+    case GTE_ENCODING_TYPE_FIBERCHANNEL:
+      enc = "FiberChannel";
+      break;
+    default:
+      break;
+  }
+
+  return enc;
+}
+
+
+
+static u_int16_t
+show_vty_link_subtlv_capability (struct vty *vty, struct te_tlv_header *tlvh)
+{
+  struct gte_link_subtlv_capability *top;
+  top = (struct gte_link_subtlv_capability *) tlvh;
+  int i = 0;
+  
+  const char *tdm = "Standard";
+
+  if (vty != NULL)
+  {
+    vty_out (vty, "  GMPLS Switching Capability: %s%s", \
+	ospf_gmpls_get_capability_switching(top->capability), VTY_NEWLINE);
+    vty_out (vty, "  GMPLS Interface Encoding: %s%s", \
+	ospf_gmpls_get_capability_encoding(top->encoding), VTY_NEWLINE);
+
+    for (i = 0; i < 8; i++)
+    {
+      float bw;
+      ntohf(&top->maxbw[i], &bw);
+
+      vty_out (vty, "  GMPLS Maximum LSP Bandwidth (pri %d): %g (bytes/sec)%s", i, \
+	  bw, VTY_NEWLINE);
+    }
+
+    if (top->capability == (GTE_SWITCHING_TYPE_PSC1 || GTE_SWITCHING_TYPE_PSC2 \
+	  || GTE_SWITCHING_TYPE_PSC3 || GTE_SWITCHING_TYPE_PSC4))
+    {
+      float bw;
+      ntohf(&top->psc.minbw,&bw);
+      
+      vty_out (vty, "   GMPLS Minimum LSP Bandwidth: %g (bytes/sec)%s", bw, VTY_NEWLINE);
+      vty_out (vty, "   GMPLS Interface MTU: %u%s", (u_int16_t) htons(top->psc.mtu), VTY_NEWLINE);
+    }
+
+    if (top->capability == GTE_SWITCHING_TYPE_TDM)
+    {
+      float bw;
+      ntohf(&top->tdm.minbw, &bw);
+
+      
+      switch (top->tdm.indication)
+      {
+	case GTE_TDM_CAPABILITY_IND_STANDARD:
+	  tdm = "Standard";
+	  break;
+	case GTE_TDM_CAPABILITY_IND_ARBITRARY:
+	  tdm = "Arbitrary";
+	  break;
+	default:
+	  break;
+      }
+	  
+      vty_out (vty, "   GMPLS Minimum LSP Bandwidth: %g (bytes/sec)%s", bw, VTY_NEWLINE);
+      vty_out (vty, "   GMPLS TDM Indication: %s%s", tdm, VTY_NEWLINE);
+    }
+  }
+  else
+  {
+    zlog_debug ("    GMPLS Switching Capability: %s", \
+	ospf_gmpls_get_capability_switching(top->capability));
+    zlog_debug ("    GMPLS Interface Encoding: %s", \
+	ospf_gmpls_get_capability_encoding(top->encoding));
+
+    for (i = 0; i < 8; i++)
+    {
+      float bw;
+      ntohf(&top->maxbw[i],&bw);
+      
+      zlog_debug ("    GMPLS Maximum LSP Bandwidth (pri %d): %g (bytes/sec)", i, \
+	  bw);
+    }
+
+    if (top->capability == (GTE_SWITCHING_TYPE_PSC1 || GTE_SWITCHING_TYPE_PSC2 \
+	  || GTE_SWITCHING_TYPE_PSC3 || GTE_SWITCHING_TYPE_PSC4))
+    {
+      float bw;
+      ntohf(&top->psc.minbw,&bw);
+      
+      zlog_debug ("     GMPLS Minimum LSP Bandwidth: %g (bytes/sec)", bw);
+      zlog_debug ("     GMPLS Interface MTU: %u", (u_int16_t) htons(top->psc.mtu));
+    }
+
+    if (top->capability == GTE_SWITCHING_TYPE_TDM)
+    {
+      float bw;
+      ntohf(&top->tdm.minbw, &bw);
+
+      
+      switch (top->tdm.indication)
+      {
+	case GTE_TDM_CAPABILITY_IND_STANDARD:
+	  tdm = "Standard";
+	  break;
+	case GTE_TDM_CAPABILITY_IND_ARBITRARY:
+	  tdm = "Arbitrary";
+	  break;
+	default:
+	  break;
+      }
+	  
+      zlog_debug ("     GMPLS Minimum LSP Bandwidth: %g (bytes/sec)", bw);
+      zlog_debug ("     GMPLS TDM Indication: %s", tdm);
+    }
+  }
+
+  return TLV_SIZE (tlvh);
+}
+
+static u_int16_t
+show_vty_link_subtlv_srlg (struct vty *vty, struct te_tlv_header *tlvh)
+{
+  struct gte_link_subtlv_srlg *top;
+  top = (struct gte_link_subtlv_srlg *) tlvh;
+  struct listnode *node, *nnode;
+  u_int32_t *data;
+  struct list *l;
+
+  l = top->srlg;
+
+  for(ALL_LIST_ELEMENTS(l,node,nnode,data))
+  {
+    if (vty != NULL)
+      vty_out (vty, "    SRLG:%u%s", (u_int32_t) htonl(*data), VTY_NEWLINE);
+    else
+      vty_out (vty, "    SRLG:%u", (u_int32_t) ntohl(*data));
+  }
+    
+  return TLV_SIZE (tlvh);
+}
+
+/* Show GMPLS protection subtlv */
+static u_int16_t
+show_vty_link_subtlv_protection (struct vty *vty, struct te_tlv_header *tlvh)
+{
+  struct gte_link_subtlv_protection *top;
+  top = (struct gte_link_subtlv_protection *) tlvh;
+  const char *cp = "Unknown";
+  
+  switch(top->value)
+  {
+    case GTE_PROTECTION_TYPE_EXTRA_TRAFFIC:
+     cp = "Extra Traffic";
+     break;
+    case GTE_PROTECTION_TYPE_UNPROTECTED:
+     cp = "Unprotected";
+     break;
+    case GTE_PROTECTION_TYPE_SHARED:
+     cp = "Shared";
+     break;
+    case GTE_PROTECTION_TYPE_DEDICATED_ONE_TO_ONE:
+     cp = "Dedicated 1:1";
+     break;
+    case GTE_PROTECTION_TYPE_DEDICATED_ONE_PLUS_ONE:
+     cp = "Dedicated 1+1";
+     break;
+    case GTE_PROTECTION_TYPE_ENCHANCED:
+     cp = "Enchanced";
+     break;
+    default:
+     break;
+  }
+  
+  if (vty != NULL)
+  {
+    vty_out (vty, "  GMPLS Protection: %s%s", cp, VTY_NEWLINE);
+  }
+  else
+  {
+    zlog_debug ("    GMPLS Protection: %s", cp);
+  }
+
+  return TLV_SIZE (tlvh);
+}
+
+/* Show GMPLS local/remote ID subtlv */
+static u_int16_t
+show_vty_link_subtlv_lrid (struct vty *vty, struct te_tlv_header *tlvh)
+{
+  struct gte_link_subtlv_lrid *top;
+  top = (struct gte_link_subtlv_lrid *) tlvh;
+  
+  if (vty != NULL)
+  {
+    vty_out (vty, "  GMPLS Local ID: %s%s", inet_ntoa (top->local), VTY_NEWLINE);
+    vty_out (vty, "  GMPLS Remote ID: %s%s", inet_ntoa (top->remote), VTY_NEWLINE);
+  }
+  else
+  {
+    zlog_debug ("    GMPLS Local ID: %s", inet_ntoa (top->local));
+    zlog_debug ("    GMPLS Remote ID: %s", inet_ntoa (top->remote));
+  }
+
+  return TLV_SIZE (tlvh);
+}
+
+
+  
 static u_int16_t
 ospf_mpls_te_show_link_subtlv (struct vty *vty, struct te_tlv_header *tlvh0,
                                u_int16_t subtotal, u_int16_t total)
@@ -1361,6 +1903,18 @@ ospf_mpls_te_show_link_subtlv (struct vty *vty, struct te_tlv_header *tlvh0,
         case TE_LINK_SUBTLV_RSC_CLSCLR:
           sum += show_vty_link_subtlv_rsc_clsclr (vty, tlvh);
           break;
+	case GTE_LINK_SUBTLV_LRID:
+	  sum += show_vty_link_subtlv_lrid (vty, tlvh);
+	  break;
+	case GTE_LINK_SUBTLV_PROTECTION:
+	  sum += show_vty_link_subtlv_protection (vty, tlvh);
+	  break;
+	case GTE_LINK_SUBTLV_CAPABILITY:
+	  sum += show_vty_link_subtlv_capability (vty, tlvh);
+	  break;
+	case GTE_LINK_SUBTLV_SRLG:
+	  sum += show_vty_link_subtlv_srlg (vty, tlvh);
+	  break;
         default:
           sum += show_vty_unknown_tlv (vty, tlvh);
           break;
@@ -1423,6 +1977,241 @@ ospf_mpls_te_config_write_router (struct vty *vty)
   return;
 }
 
+/* Get GMPLS Capability description */
+const char *
+ospf_gmpls_get_write_if_capability_switching (int c)
+{
+  const char *cap = "unkown";
+  
+  switch(c)
+  {
+    case GTE_SWITCHING_TYPE_PSC1:
+      cap = "psc1";
+      break;
+    case GTE_SWITCHING_TYPE_PSC2:
+      cap = "psc2";
+      break;
+    case GTE_SWITCHING_TYPE_PSC3:
+      cap = "psc3";
+      break;
+    case GTE_SWITCHING_TYPE_PSC4:
+      cap = "psc4";
+      break;
+    case GTE_SWITCHING_TYPE_L2SC:
+      cap = "l2sc";
+      break;
+    case GTE_SWITCHING_TYPE_TDM:
+      cap = "tdm";
+      break;
+    case GTE_SWITCHING_TYPE_LSC:
+      cap = "lsc";
+      break;
+    case GTE_SWITCHING_TYPE_FSC:
+      cap = "fsc";
+      break;
+    default:
+      break;
+  }
+  return cap;
+
+}
+
+/* Get GMPLS encoding capability string */
+const char *
+ospf_gmpls_get_write_if_capability_encoding (int e)
+{
+  const char *enc = "unknown";
+  
+  switch(e)
+  {
+    case GTE_ENCODING_TYPE_PACKET:
+      enc = "packet";
+      break;
+    case GTE_ENCODING_TYPE_ETHERNET:
+      enc = "ethernet";
+      break;
+    case GTE_ENCODING_TYPE_PDH:
+      enc = "pdh";
+      break;
+    case GTE_ENCODING_TYPE_SDH_SONET:
+      enc = "sonet-sdh";
+      break;
+    case GTE_ENCODING_TYPE_DWRAPPER:
+      enc = "dwrapper";
+      break;
+    case GTE_ENCODING_TYPE_LAMBDA:
+      enc = "lambda";
+      break;
+    case GTE_ENCODING_TYPE_FIBER:
+      enc = "fiber";
+      break;
+    case GTE_ENCODING_TYPE_FIBERCHANNEL:
+      enc = "fiberchannel";
+      break;
+    default:
+      break;
+  }
+
+  return enc;
+}
+
+
+
+/* GMPLS capability switching output */
+static void
+ospf_gmpls_te_config_write_if_cap_switching (struct vty *vty, struct mpls_te_link *lp)
+{
+  if (htons(lp->capability.header.type) == 0)
+    return;
+
+  if (lp->capability.capability != GTE_SWITCHING_TYPE_PSC1)
+    vty_out(vty, " gmpls-te link capability switching %s%s", \
+	ospf_gmpls_get_write_if_capability_switching(lp->capability.capability), VTY_NEWLINE);
+}
+
+/* GMPLS capabality encoding output */
+static void
+ospf_gmpls_te_config_write_if_cap_encoding (struct vty *vty, struct mpls_te_link *lp)
+{
+  if (htons(lp->capability.header.type) == 0)
+    return;
+
+  if (lp->capability.encoding != GTE_ENCODING_TYPE_ETHERNET)
+    vty_out(vty, " gmpls-te link capability encoding %s%s", \
+	ospf_gmpls_get_write_if_capability_encoding(lp->capability.encoding), VTY_NEWLINE);
+ 
+}
+
+/*GMPLS if lrid output */
+static void 
+ospf_gmpls_te_config_write_if_lrid(struct vty *vty,struct mpls_te_link *lp)
+{
+
+  if (ntohs(lp->lrid.header.type) == 0)
+    return;
+
+  if (inet_ntoa(lp->lrid.local) != "0.0.0.0")
+    vty_out (vty, " gmpls-te link local-id %s%s", inet_ntoa(lp->lrid.local), VTY_NEWLINE);
+
+  if (inet_ntoa(lp->lrid.remote) != "0.0.0.0")
+    vty_out (vty, " gmpls-te link remote-id %s%s", inet_ntoa(lp->lrid.remote), VTY_NEWLINE);
+ 
+}
+      
+/*GMPLS if capability output */
+static void 
+ospf_gmpls_te_config_write_if_capability(struct vty *vty, struct mpls_te_link *lp)
+{
+  float fval,defbw;
+  int i;
+  u_int16_t ui;
+  
+  if (ntohs(lp->capability.header.type) == 0)
+    return;
+  
+  ospf_gmpls_te_config_write_if_cap_switching(vty,lp);
+  ospf_gmpls_te_config_write_if_cap_encoding(vty,lp);
+  
+  defbw = OSPF_DEFAULT_BANDWIDTH * 1000 / 8;
+  
+  for (i = 0; i < 8; i++)
+  {
+    ntohf(&lp->capability.maxbw[i], &fval);
+    if (fval != defbw)
+      vty_out(vty, " gmpls-te link capability max-lsp-bw %d %g%s", i, fval, VTY_NEWLINE);
+  }
+
+  
+  if (lp->capability.capability == (GTE_SWITCHING_TYPE_PSC1 || \
+	      GTE_SWITCHING_TYPE_PSC2 || GTE_SWITCHING_TYPE_PSC3 || \
+	      GTE_SWITCHING_TYPE_PSC4))
+  {
+    ntohf(&lp->capability.psc.minbw, &fval);
+    if(fval != MPLS_TE_MINIMUM_BANDWIDTH)
+      vty_out(vty, " gmpls-te link capability min-lsp-bw %g%s", fval, VTY_NEWLINE);
+  
+    ui = ntohs(lp->capability.psc.mtu);
+    if (ui != lp->ifp->mtu)
+      vty_out(vty, " gmpls-te link capability mtu %u%s", ui, VTY_NEWLINE);
+  }
+
+  if (lp->capability.capability == GTE_SWITCHING_TYPE_TDM)
+  {
+    ntohf(&lp->capability.tdm.minbw, &fval);
+  
+    if (lp->capability.tdm.indication != GTE_TDM_CAPABILITY_IND_STANDARD)
+      vty_out(vty, " gmpls-te link capability indication arbitrary%s", VTY_NEWLINE);
+
+  }
+}
+      
+/*GMPLS if protection output */
+static void 
+ospf_gmpls_te_config_write_if_protection(struct vty *vty,struct mpls_te_link *lp)
+{
+  if (ntohs(lp->protection.header.type) == 0)
+    return;
+
+  const char *prot = "unknown";
+
+  switch(lp->protection.value)
+  {
+    case GTE_PROTECTION_TYPE_EXTRA_TRAFFIC:
+     prot="extra-traffic";
+     break;
+    case GTE_PROTECTION_TYPE_UNPROTECTED:
+     prot="unprotected";
+     break;
+    case GTE_PROTECTION_TYPE_SHARED:
+     prot="shared";
+     break;
+    case GTE_PROTECTION_TYPE_DEDICATED_ONE_TO_ONE:
+     prot="dedicated one-to-one";
+     break;
+    case GTE_PROTECTION_TYPE_DEDICATED_ONE_PLUS_ONE:
+     prot="dedicated one-plus-one";
+     break;
+    case GTE_PROTECTION_TYPE_ENCHANCED:
+     prot="enchanced";
+     break;
+    default:
+     break;
+  }
+  
+  vty_out(vty, " gmpls-te link protection %s%s", prot, VTY_NEWLINE);
+}
+      
+/*GMPLS if srlg output */
+static void 
+ospf_gmpls_te_config_write_if_srlg(struct vty *vty,struct mpls_te_link *lp)
+{
+  struct listnode *node,*nnode;
+  u_int32_t *risk;
+  
+  if (ntohs(lp->srlg.header.type) == 0)
+    return;
+
+  for(ALL_LIST_ELEMENTS(lp->srlg.srlg, node, nnode, risk))
+    vty_out(vty, " gmpls-te link srlg %d%s", *risk, VTY_NEWLINE);
+}
+      
+/*GMPLS if output */
+static void 
+ospf_gmpls_te_config_write_if (struct vty *vty, struct interface *ifp)
+{
+  struct mpls_te_link *lp;
+
+  if ((OspfMplsTE.status == enabled)
+  &&  (! if_is_loopback (ifp) && if_is_up (ifp) && ospf_oi_count (ifp) > 0)
+  &&  ((lp = lookup_linkparams_by_ifp (ifp)) != NULL))
+    {
+      ospf_gmpls_te_config_write_if_lrid(vty,lp);
+      ospf_gmpls_te_config_write_if_capability(vty, lp);
+      ospf_gmpls_te_config_write_if_protection(vty, lp);
+      ospf_gmpls_te_config_write_if_srlg(vty,lp);
+    }
+}
+
 static void
 ospf_mpls_te_config_write_if (struct vty *vty, struct interface *ifp)
 {
@@ -1456,6 +2245,10 @@ ospf_mpls_te_config_write_if (struct vty *vty, struct interface *ifp)
 
       vty_out (vty, " mpls-te link rsc-clsclr 0x%x%s",
                (u_int32_t) ntohl (lp->rsc_clsclr.value), VTY_NEWLINE);
+      
+      /* GMPLS IF output */
+      ospf_gmpls_te_config_write_if (vty, ifp);
+
     }
   return;
 }
@@ -1758,6 +2551,501 @@ DEFUN (mpls_te_link_unrsv_bw,
   return CMD_SUCCESS;
 }
 
+/* LSA update function if one link parameter changes */
+static void
+ospf_mpls_te_lsa_update (struct mpls_te_link *lp)
+{
+  if (OspfMplsTE.status == enabled)
+    if (lp->area != NULL)
+    {
+      if (lp->flags & LPFLG_LSA_ENGAGED)
+        ospf_mpls_te_lsa_schedule (lp, REFRESH_THIS_LSA);
+      else
+        ospf_mpls_te_lsa_schedule (lp, REORIGINATE_PER_AREA);
+    }
+}
+
+DEFUN (gmpls_te_link_capability,
+       gmpls_te_link_capability_switching_cmd,
+       "gmpls-te link capability switching (psc1|psc2|psc3|psc4|l2sc|tdm|lsc|fsc)",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Configure GMPLS link capability\n"
+       "Interface switching capability\n"
+       "Packet-Switch Capable-1\n"
+       "Packet-Switch Capable-2\n"
+       "Packet-Switch Capable-3\n"
+       "Packet-Switch Capable-4\n"
+       "Layer-2 Switch Capable\n"
+       "Time-Division-Multiplex Capable\n"
+       "Lambda-Switch Capable\n"
+       "Fiber-Switch Capable\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  u_char cap;
+
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+    {
+      vty_out (vty, "gmpls_link_capability: Something wrong!%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+  
+  if (strncmp(argv[0], "psc1", 4) == 0)
+    cap = GTE_SWITCHING_TYPE_PSC1;
+  else if (strncmp(argv[0], "psc2", 4) == 0)
+    cap = GTE_SWITCHING_TYPE_PSC2;
+  else if (strncmp(argv[0], "psc3", 4) == 0)
+    cap = GTE_SWITCHING_TYPE_PSC3;
+  else if (strncmp(argv[0], "psc4", 4) == 0)
+    cap = GTE_SWITCHING_TYPE_PSC4;
+  else if (strncmp(argv[0], "l2", 2) == 0)
+    cap = GTE_SWITCHING_TYPE_L2SC;
+  else if (strncmp(argv[0], "t", 1) == 0)
+    cap = GTE_SWITCHING_TYPE_TDM;
+  else if (strncmp(argv[0], "ls", 2) == 0)
+    cap = GTE_SWITCHING_TYPE_LSC;
+  else if (strncmp(argv[0], "f", 1) == 0)
+    cap = GTE_SWITCHING_TYPE_FSC;
+  else return CMD_WARNING;
+
+  if (ntohs (lp->capability.header.type) == 0)
+  {
+    set_linkparams_capability_init(lp);
+    set_linkparams_capability_cap (lp, cap);
+
+    ospf_mpls_te_lsa_update (lp);
+  }
+  else if (lp->capability.capability != cap)
+  {
+    set_linkparams_capability_cap (lp, cap);
+    ospf_mpls_te_lsa_update (lp);
+  }
+  return CMD_SUCCESS;
+}  
+
+/* GMPLS encoding setting */
+DEFUN (gmpls_te_link_capability_encoding,
+       gmpls_te_link_capability_encoding_cmd,
+       "gmpls-te link capability encoding (packet|ethernet|pdh|sonet-sdh|dwrapper|lambda|fiber|fiberchannel)",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Configure GMPLS link capability\n"
+       "Interface encoding\n"
+       "Packet encoding\n"
+       "Ethernet encoding\n"
+       "ANSI/ETSI PDH\n"
+       "SDH ITU-T G.707 / SONET ANSI T1.105\n"
+       "Digital Wrapper\n"
+       "Lambda (photonic)\n"
+       "Fiber\n"
+       "FiberChannel\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  u_char enc;
+
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+    {
+      vty_out (vty, "gmpls_link_capability_encoding: Something wrong!%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+  
+  if (strncmp(argv[0], "pa", 2) == 0)
+    enc = GTE_ENCODING_TYPE_PACKET;
+  else if (strncmp(argv[0], "et", 2) == 0)
+    enc = GTE_ENCODING_TYPE_ETHERNET;
+  else if (strncmp(argv[0], "pd", 2) == 0)
+    enc = GTE_ENCODING_TYPE_PDH;
+  else if (strncmp(argv[0], "s", 1) == 0)
+    enc = GTE_ENCODING_TYPE_SDH_SONET;
+  else if (strncmp(argv[0], "d", 1) == 0)
+    enc = GTE_ENCODING_TYPE_DWRAPPER;
+  else if (strncmp(argv[0], "l", 1) == 0)
+    enc = GTE_ENCODING_TYPE_LAMBDA;
+  else if (strncmp(argv[0], "fiberc", 6) == 0)
+    enc = GTE_ENCODING_TYPE_FIBERCHANNEL;
+  else if (strncmp(argv[0], "f", 1) == 0)
+    enc = GTE_ENCODING_TYPE_FIBER;
+  else return CMD_WARNING;
+
+  if (ntohs (lp->capability.header.type) == 0)
+  {
+    set_linkparams_capability_init(lp);
+    set_linkparams_capability_encoding(lp,enc);
+    
+    ospf_mpls_te_lsa_update(lp);
+    
+  }
+  else if (lp->capability.encoding != enc)
+  {
+    set_linkparams_capability_encoding (lp, enc);
+    ospf_mpls_te_lsa_update(lp);  
+  }
+      
+  return CMD_SUCCESS;
+}
+  
+/* GMPLS Maximum LSP bandwidth setting */
+DEFUN (gmpls_te_link_capability_maxbw,
+       gmpls_te_link_capability_maxbw_cmd,
+       "gmpls-te link capability max-lsp-bw <0-7> BANDWIDTH",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Configure GMPLS link capability\n"
+       "Maximum LSP bandwidth at each priority level\n"
+       "Priority\n"
+       "Bytes/second (IEEE floating point format)\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  float f1,f2;
+  int priority;
+  
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+  {
+    vty_out (vty, "gmpls_link_capability_maxbw: Something wrong!%s", VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+  
+  if (sscanf (argv[0], "%d", &priority) != 1)
+  {
+    vty_out (vty, "gmpls_te_link_capability_maxbw: fscanf: %s%s", safe_strerror (errno), VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+
+    
+  if (sscanf (argv[1], "%g", &f2) != 1)
+  {
+    vty_out (vty, "gmpls_te_link_capability_maxbw: fscanf: %s%s", safe_strerror (errno), VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+
+
+
+  if (ntohs (lp->capability.header.type) == 0)
+  {
+    set_linkparams_capability_init(lp);
+    set_linkparams_capability_maxbw(lp,priority,f2);
+    
+    ospf_mpls_te_lsa_update(lp);
+    
+  }
+  else 
+  {
+    ntohf (&lp->capability.maxbw[priority], &f1);
+    
+    if (f1 != f2)
+    {
+      set_linkparams_capability_maxbw(lp, priority, f2);
+      ospf_mpls_te_lsa_update(lp);  
+    }
+  }
+      
+  return CMD_SUCCESS;
+}
+/* GMPLS Minimum LSP bandwidth setting */
+DEFUN (gmpls_te_link_capability_minbw,
+       gmpls_te_link_capability_minbw_cmd,
+       "gmpls-te link capability min-lsp-bw BANDWIDTH",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Configure GMPLS link capability\n"
+       "Minimum LSP bandwidth\n"
+       "Bytes/second (IEEE floating point format)\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  float f1,f2;
+  
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+  {
+    vty_out (vty, "gmpls_link_capability_maxbw: Something wrong!%s", VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+  
+  if (sscanf (argv[0], "%g", &f2) != 1)
+  {
+    vty_out (vty, "gmpls_te_link_capability_maxbw: fscanf: %s%s", safe_strerror (errno), VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+
+
+
+  if (ntohs (lp->capability.header.type) == 0)
+  {
+    set_linkparams_capability_init(lp);
+    set_linkparams_capability_minbw(lp,GTE_SWITCHING_TYPE_PSC1,f2);
+    
+    ospf_mpls_te_lsa_update(lp);
+    
+  }
+  else 
+  {
+    if (lp->capability.capability != (GTE_SWITCHING_TYPE_PSC1 || \
+	  GTE_SWITCHING_TYPE_PSC2 || GTE_SWITCHING_TYPE_PSC3 || GTE_SWITCHING_TYPE_PSC4 || \
+	  GTE_SWITCHING_TYPE_TDM))
+    {
+       vty_out (vty, "Wrong switching type. Must be PSC1, PSC2, PSC3, PSC4 or TDM%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+ 
+    if (lp->capability.capability == GTE_SWITCHING_TYPE_TDM)
+    {
+      ntohf (&lp->capability.tdm.minbw, &f1);
+    } 
+    else
+    {
+      ntohf (&lp->capability.psc.minbw, &f1);
+    }
+    
+    if (f1 != f2)
+    {
+      set_linkparams_capability_minbw(lp,lp->capability.capability, f2);
+      ospf_mpls_te_lsa_update(lp);  
+    }
+  }
+      
+  return CMD_SUCCESS;
+}
+
+
+/* GMPLS Interface MTU setting */
+DEFUN (gmpls_te_link_capability_mtu,
+       gmpls_te_link_capability_mtu_cmd,
+       "gmpls-te link capability mtu <40-65535>",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Configure GMPLS link capability\n"
+       "Interface MTU (applicable only to PSCx)\n"
+       "Bytes\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  int mtu;
+  
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+  {
+    vty_out (vty, "gmpls_link_capability_mtu: Something wrong!%s", VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+  
+  if (sscanf (argv[0], "%d", &mtu) != 1)
+  {
+    vty_out (vty, "gmpls_te_link_capability_mtu: fscanf: %s%s", safe_strerror (errno), VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+
+
+  if (ntohs (lp->capability.header.type) == 0)
+  {
+    set_linkparams_capability_init(lp);
+    set_linkparams_capability_mtu(lp, mtu);
+    
+    ospf_mpls_te_lsa_update(lp);
+    
+  }
+  else 
+  {
+    if (lp->capability.capability != (GTE_SWITCHING_TYPE_PSC1 || GTE_SWITCHING_TYPE_PSC2 || GTE_SWITCHING_TYPE_PSC3 || GTE_SWITCHING_TYPE_PSC4))
+    {
+       vty_out (vty, "Wrong switching type. Must be PSC1, PSC2, PSC3 or PSC4%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+ 
+    if (mtu != htons(lp->capability.psc.mtu))
+    {
+      set_linkparams_capability_mtu(lp,mtu);
+      ospf_mpls_te_lsa_update(lp);  
+    }
+  }
+      
+  return CMD_SUCCESS;
+}
+
+/* GMPLS Indication setting */
+DEFUN (gmpls_te_link_capability_indication,
+       gmpls_te_link_capability_indication_cmd,
+       "gmpls-te link capability indication (standard|arbitrary)",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Configure GMPLS link capability\n"
+       "Interface indication (applicable only to SONET/SDH)\n"
+       "Standard SONET/SDH\n"
+       "Arbitrary SONET/SDH\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  u_char ind;
+  
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+  {
+    vty_out (vty, "gmpls_link_capability_mtu: Something wrong!%s", VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+  
+  if (strncmp(argv[0],"a",1) == 0)
+    ind = 1;
+  else if (strncmp(argv[0],"s",1) == 0)
+    ind = 0;
+  else return CMD_WARNING; 
+    
+  if (ntohs (lp->capability.header.type) == 0)
+  {
+    set_linkparams_capability_init(lp);
+    set_linkparams_capability_cap(lp, GTE_SWITCHING_TYPE_TDM);
+    set_linkparams_capability_indication(lp, ind);
+    
+    ospf_mpls_te_lsa_update(lp);
+    
+  }
+  else 
+  {
+    if (lp->capability.capability != GTE_SWITCHING_TYPE_TDM)
+    {
+       vty_out (vty, "Wrong switching type. Must be TDM%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+ 
+    if (ind != lp->capability.tdm.indication)
+    {
+      set_linkparams_capability_indication(lp,ind);
+      ospf_mpls_te_lsa_update(lp);  
+    }
+  }
+      
+  return CMD_SUCCESS;
+}
+
+/* GMPLS Protection setting */
+DEFUN (gmpls_te_link_protection,
+       gmpls_te_link_protection_cmd,
+       "gmpls-te link protection (extra-traffic|unprotected|shared|enchanced)",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Interface protection level\n"
+       "Extra-traffic link\n"
+       "Unprotected link\n"
+       "Shared protection\n"
+       "Enchanced protection (e.g. BLSR/MS-SPRING)\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  u_char prot;
+
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+  {
+    vty_out (vty, "gmpls_link_protection: Something wrong!%s", VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+  
+  if (strncmp(argv[0],"ex",2))
+    prot = GTE_PROTECTION_TYPE_EXTRA_TRAFFIC;
+  else if (strncmp(argv[0],"u",1))
+    prot = GTE_PROTECTION_TYPE_UNPROTECTED;
+  else if (strncmp(argv[0],"s",1))
+    prot = GTE_PROTECTION_TYPE_SHARED;
+  else if (strncmp(argv[0],"e",1))
+    prot = GTE_PROTECTION_TYPE_ENCHANCED;
+  else if (strncmp(argv[0],"d",1))
+    {
+      if (strncmp(argv[1],"one-t",5))
+        prot = GTE_PROTECTION_TYPE_DEDICATED_ONE_TO_ONE;
+      else if (strncmp(argv[1],"one-p",5))
+        prot = GTE_PROTECTION_TYPE_DEDICATED_ONE_PLUS_ONE;
+    }
+  else return CMD_WARNING;
+
+  if (ntohs (lp->capability.header.type) == 0)
+  {
+    set_linkparams_capability_init(lp);
+    set_linkparams_protection(lp,prot);
+    ospf_mpls_te_lsa_update(lp);
+  }
+  else
+  {
+    set_linkparams_protection(lp,prot);
+    ospf_mpls_te_lsa_update(lp);
+  }
+
+  return CMD_SUCCESS;
+}
+
+/* GMPLS dedicated protection setting */
+ALIAS (gmpls_te_link_protection,
+       gmpls_te_link_protection_dedicated_cmd,
+       "gmpls-te link protection dedicated (one-to-one|one-plus-one)",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Interface protection level\n"
+       "Dedicated protection\n"
+       "1:1 protection\n"
+       "1+1 protection\n")
+
+/* GMPLS lrid setting */
+DEFUN (gmpls_te_link_lrid,
+       gmpls_te_link_lrid_cmd,
+       "gmpls-te link (local-id|remote-id) A.B.C.D",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Local link ID\n"
+       "Remote link ID\n"
+       "ID\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  struct in_addr value; 
+
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+  {
+    vty_out (vty, "gmpls_link_lrid: Something wrong!%s", VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+
+  if (! inet_aton(argv[1], &value))
+  {
+    vty_out (vty, "Please specify Router-Addr by A.B.C.D%s", VTY_NEWLINE);
+      return CMD_WARNING;
+  }
+
+  if (strncmp(argv[0],"l",1))
+    set_linkparams_lrid_local(lp,value);
+  else if (strncmp(argv[0],"r",1))
+    set_linkparams_lrid_remote(lp,value);
+  else return CMD_WARNING;
+
+  return CMD_SUCCESS;
+}
+
+/* GMPLS srlg setting */
+DEFUN (gmpls_te_link_srlg,
+       gmpls_te_link_srlg_cmd,
+       "gmpls-te link srlg <0-4294967295>",
+       "GMPLS specific commands\n"
+       "Configure GMPLS link parameters\n"
+       "Shared Risk Link Group configuration\n"
+       "SRLG number\n")
+{
+  struct interface *ifp = (struct interface *) vty->index;
+  struct mpls_te_link *lp;
+  u_int32_t risk;
+
+  if ((lp = lookup_linkparams_by_ifp (ifp)) == NULL)
+  {
+    vty_out (vty, "gmpls_link_slrg: Something wrong!%s", VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+
+  if (sscanf(argv[0],"%u",&risk) != 1)
+  {
+    vty_out (vty, "gmpls_te_link_capability_mtu: fscanf: %s%s", safe_strerror (errno), VTY_NEWLINE);
+    return CMD_WARNING;
+  }
+
+  set_linkparams_srlg(lp,risk);
+  return CMD_SUCCESS;
+}
+
 DEFUN (mpls_te_link_rsc_clsclr,
        mpls_te_link_rsc_clsclr_cmd,
        "mpls-te link rsc-clsclr BITPATTERN",
@@ -1903,6 +3191,16 @@ ospf_mpls_te_register_vty (void)
   install_element (INTERFACE_NODE, &mpls_te_link_max_rsv_bw_cmd);
   install_element (INTERFACE_NODE, &mpls_te_link_unrsv_bw_cmd);
   install_element (INTERFACE_NODE, &mpls_te_link_rsc_clsclr_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_capability_switching_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_capability_encoding_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_capability_maxbw_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_capability_minbw_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_capability_mtu_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_capability_indication_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_lrid_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_protection_dedicated_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_protection_cmd);
+  install_element (INTERFACE_NODE, &gmpls_te_link_srlg_cmd);
 
   return;
 }
