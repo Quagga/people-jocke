@@ -458,6 +458,9 @@ ospf_if_lookup_recv_if (struct ospf *ospf, struct in_addr src,
     {
       oi = rn->info;
 
+      if (!oi) /* oi can be NULL for PtP aliases */
+	continue;
+
       if (oi->type == OSPF_IFTYPE_VIRTUALLINK)
 	continue;
 
