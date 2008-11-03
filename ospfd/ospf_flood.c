@@ -134,9 +134,8 @@ ospf_process_self_originated_lsa (struct ospf *ospf,
     case OSPF_ROUTER_LSA:
       /* Originate a new instance and schedule flooding */
       /* It shouldn't be necessary, but anyway */
-      ospf_lsa_unlock (&area->router_lsa_self);
-      area->router_lsa_self = ospf_lsa_lock (new);
-
+      if (area->router_lsa_self)
+	area->router_lsa_self->data->ls_seqnum = new->data->ls_seqnum;
       ospf_router_lsa_timer_add (area);
       return;
     case OSPF_NETWORK_LSA:
@@ -169,10 +168,8 @@ ospf_process_self_originated_lsa (struct ospf *ospf,
                 return;
               }
 #endif /* HAVE_OPAQUE_LSA */
-
-            ospf_lsa_unlock (&oi->network_lsa_self);
-            oi->network_lsa_self = ospf_lsa_lock (new);
-            
+	    if (oi->network_lsa_self)
+	      oi->network_lsa_self->data->ls_seqnum = new->data->ls_seqnum;
             /* Schedule network-LSA origination. */
             ospf_network_lsa_timer_add (oi);
             return;
@@ -315,15 +312,6 @@ ospf_flood (struct ospf *ospf, struct ospf_neighbor *nbr,
   SET_FLAG (new->flags, OSPF_LSA_RECEIVED);
   ospf_lsa_is_self_originated (ospf, new); /* Let it set the flag */
 
-  /* Install the new LSA in the link state database
-     (replacing the current database copy).  This may cause the
-     routing table calculation to be scheduled.  In addition,
-     timestamp the new LSA with the current time.  The flooding
-     procedure cannot overwrite the newly installed LSA until
-     MinLSArrival seconds have elapsed. */  
-
-  new = ospf_lsa_install (ospf, nbr->oi, new);
-
   /* Acknowledge the receipt of the LSA by sending a Link State
      Acknowledgment packet back out the receiving interface. */
   if (lsa_ack_flag)
@@ -336,9 +324,17 @@ ospf_flood (struct ospf *ospf, struct ospf_neighbor *nbr,
   if (ospf_lsa_is_self_originated (ospf, new))
     ospf_process_self_originated_lsa (ospf, new, oi->area);
   else
-    /* Update statistics value for OSPF-MIB. */
-    ospf->rx_lsa_count++;
-
+    {
+      /* Install the new LSA in the link state database
+	 (replacing the current database copy).  This may cause the
+	 routing table calculation to be scheduled.  In addition,
+	 timestamp the new LSA with the current time.  The flooding
+	 procedure cannot overwrite the newly installed LSA until
+	 MinLSArrival seconds have elapsed. */
+      new = ospf_lsa_install (ospf, nbr->oi, new);
+      /* Update statistics value for OSPF-MIB. */
+      ospf->rx_lsa_count++;
+    }
   return 0;
 }
 
