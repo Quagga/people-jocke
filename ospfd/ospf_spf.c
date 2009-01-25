@@ -658,6 +658,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
   /* Check if W's parent is a network connected to root. */
   else if (v->type == OSPF_VERTEX_NETWORK)
     {
+      int root_found = 0;
       /* See if any of V's parents are the root. */
       for (ALL_LIST_ELEMENTS (v->parents, node, nnode, vp))
         {
@@ -668,7 +669,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
 	       * router.  The list of next hops is then determined by
 	       * examining the destination's router-LSA...
 	       */
-
+	      root_found = 1; /* We are connected to the root */
 	      assert(w->type == OSPF_VERTEX_ROUTER);
               while ((l = ospf_get_next_link (w, v, l)))
                 {
@@ -680,20 +681,13 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
 		   */
 		  nh = vertex_nexthop_new ();
 		  nh->oi = vp->nexthop->oi;
-		  /* What to do with unnumbered PtP links?
-		   * Ignore them or interface route?
-		   * Add a inteface route for now.
-		   */
-		  if (ntohl(l->link_data.s_addr) <= 0x00ffffff)
-		    nh->router.s_addr = 0; /* Interface route */
-		  else
-		    nh->router = l->link_data;
+		  nh->router = l->link_data;
 		  added = 1;
                   ospf_spf_add_parent (v, w, nh, distance);
                 }
             }
         }
-      if (added)
+      if (root_found)
         return added;
     }
 
